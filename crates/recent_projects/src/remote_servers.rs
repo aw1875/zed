@@ -99,12 +99,28 @@ enum DevContainerCreationProgress {
 }
 
 #[derive(Clone)]
+struct DevContainerLogPanel {
+    logs: Vec<DevContainerUpOutput>,
+    scroll_handle: ScrollHandle,
+    expanded: bool,
+}
+
+impl DevContainerLogPanel {
+    fn new() -> Self {
+        Self {
+            logs: Vec::new(),
+            scroll_handle: ScrollHandle::new(),
+            expanded: true,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct CreateRemoteDevContainer {
     view_logs_entry: NavigableEntry,
     back_entry: NavigableEntry,
     progress: DevContainerCreationProgress,
-    logs: Vec<DevContainerUpOutput>,
-    logs_expanded: bool,
+    log_panel: DevContainerLogPanel,
 }
 
 impl CreateRemoteDevContainer {
@@ -115,8 +131,7 @@ impl CreateRemoteDevContainer {
             view_logs_entry,
             back_entry,
             progress,
-            logs: Vec::new(),
-            logs_expanded: false,
+            log_panel: DevContainerLogPanel::new(),
         }
     }
 }
@@ -1861,7 +1876,7 @@ impl RemoteServerProjects {
                                 if let Mode::CreateRemoteDevContainer(state) =
                                     &mut remote_server_projects.mode
                                 {
-                                    state.logs.push(log_output);
+                                    state.log_panel.logs.push(log_output);
                                     cx.notify();
                                 }
                             })
@@ -2059,7 +2074,7 @@ impl RemoteServerProjects {
                                             .child(LoadingLabel::new("")),
                                     ),
                             )
-                            .when(!state.logs.is_empty(), |this| {
+                            .when(!state.log_panel.logs.is_empty(), |this| {
                                 this.child(
                                     v_flex()
                                         .child(
@@ -2067,7 +2082,7 @@ impl RemoteServerProjects {
                                                 .inset(true)
                                                 .spacing(ui::ListItemSpacing::Sparse)
                                                 .start_slot(
-                                                    Icon::new(if state.logs_expanded {
+                                                    Icon::new(if state.log_panel.expanded {
                                                         IconName::ChevronDown
                                                     } else {
                                                         IconName::ChevronRight
@@ -2075,26 +2090,28 @@ impl RemoteServerProjects {
                                                     .color(Color::Muted),
                                                 )
                                                 .child(Label::new(format!(
-                                                    "Logs ({} lines)",
-                                                    state.logs.len()
+                                                    "Progress ({} lines)",
+                                                    state.log_panel.logs.len()
                                                 )))
                                                 .on_click(cx.listener(|this, _, window, cx| {
                                                     if let Mode::CreateRemoteDevContainer(state) =
                                                         &mut this.mode
                                                     {
-                                                        state.logs_expanded = !state.logs_expanded;
+                                                        state.log_panel.expanded = !state.log_panel.expanded;
                                                         this.focus_handle(cx).focus(window, cx);
                                                         cx.notify();
                                                     }
                                                 })),
                                         )
-                                        .when(state.logs_expanded, |this| {
+                                        .when(state.log_panel.expanded, |this| {
+                                            state.log_panel.scroll_handle.scroll_to_bottom();
                                             this.child(
                                                 div()
                                                     .id("devcontainer-build-logs")
                                                     .bg(cx.theme().colors().editor_background)
                                                     .h_80()
                                                     .overflow_y_scroll()
+                                                    .track_scroll(&state.log_panel.scroll_handle)
                                                     .mx_2()
                                                     .my_1()
                                                     .border_1()
@@ -2104,7 +2121,7 @@ impl RemoteServerProjects {
                                                     .p_2()
                                                     .rounded_md()
                                                     .child(v_flex().gap_0p5().children(
-                                                        state.logs.iter().rev().map(|log| {
+                                                        state.log_panel.logs.iter().map(|log| {
                                                             Label::new(log.text.clone())
                                                                 .size(LabelSize::Small)
                                                                 .color(match log.level {
