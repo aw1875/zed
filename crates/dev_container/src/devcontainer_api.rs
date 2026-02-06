@@ -106,13 +106,32 @@ pub struct DevContainerUpOutput {
     pub text: String,
 }
 
+/// Strips ANSI escape sequences from a string
+fn strip_ansi_codes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut in_escape = false;
+
+    for c in s.chars() {
+        if c == '\x1b' {
+            in_escape = true;
+        } else if in_escape {
+            if c == 'm' {
+                in_escape = false;
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
 impl DevContainerUpOutput {
     pub fn from_json(json_str: &str) -> Option<Self> {
         serde_json::from_str::<Self>(json_str)
             .ok()
             .map(|mut output| {
-                output.text = output
-                    .text
+                output.text = strip_ansi_codes(&output.text)
                     .trim_end_matches(|c| c == '\n' || c == '\r')
                     .to_string();
                 output
