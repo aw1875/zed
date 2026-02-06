@@ -6,7 +6,8 @@ use crate::{
     ssh_config::parse_ssh_config_hosts,
 };
 use dev_container::{
-    DevContainerConfig, find_devcontainer_configs, start_dev_container_with_config,
+    DevContainerConfig, DevContainerLogLevel, DevContainerUpOutput, find_devcontainer_configs,
+    start_dev_container_with_config,
 };
 use editor::Editor;
 
@@ -102,6 +103,8 @@ struct CreateRemoteDevContainer {
     view_logs_entry: NavigableEntry,
     back_entry: NavigableEntry,
     progress: DevContainerCreationProgress,
+    logs: Vec<DevContainerUpOutput>,
+    logs_expanded: bool,
 }
 
 impl CreateRemoteDevContainer {
@@ -112,6 +115,8 @@ impl CreateRemoteDevContainer {
             view_logs_entry,
             back_entry,
             progress,
+            logs: Vec::new(),
+            logs_expanded: false,
         }
     }
 }
@@ -1840,35 +1845,67 @@ impl RemoteServerProjects {
 
         let replace_window = window.window_handle().downcast::<Workspace>();
 
+        let (output_sender, mut output_receiver) =
+            futures::channel::mpsc::unbounded::<DevContainerUpOutput>();
+
         cx.spawn_in(window, async move |entity, cx| {
-            let (connection, starting_dir) =
-                match start_dev_container_with_config(cx, app_state.node_runtime.clone(), config)
-                    .await
-                {
-                    Ok((c, s)) => (Connection::DevContainer(c), s),
-                    Err(e) => {
-                        log::error!("Failed to start dev container: {:?}", e);
-                        cx.prompt(
-                            gpui::PromptLevel::Critical,
-                            "Failed to start Dev Container. See logs for details",
-                            Some(&format!("{e}")),
-                            &["Ok"],
-                        )
-                        .await
-                        .ok();
-                        entity
-                            .update_in(cx, |remote_server_projects, window, cx| {
-                                remote_server_projects.mode =
-                                    Mode::CreateRemoteDevContainer(CreateRemoteDevContainer::new(
-                                        DevContainerCreationProgress::Error(format!("{e}")),
-                                        cx,
-                                    ));
-                                remote_server_projects.focus_handle(cx).focus(window, cx);
+            let log_entity = entity.clone();
+            let mut log_cx = cx.clone();
+            cx.foreground_executor()
+                .spawn(async move {
+                    while let Some(log_output) =
+                        futures::StreamExt::next(&mut output_receiver).await
+                    {
+                        if log_entity
+                            .update_in(&mut log_cx, |remote_server_projects, _, cx| {
+                                if let Mode::CreateRemoteDevContainer(state) =
+                                    &mut remote_server_projects.mode
+                                {
+                                    state.logs.push(log_output);
+                                    cx.notify();
+                                }
                             })
-                            .ok();
-                        return;
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
-                };
+                })
+                .detach();
+
+            let (connection, starting_dir) = match start_dev_container_with_config(
+                cx,
+                app_state.node_runtime.clone(),
+                config,
+                output_sender,
+            )
+            .await
+            {
+                Ok((c, s)) => (Connection::DevContainer(c), s),
+                Err(e) => {
+                    log::error!("Failed to start dev container: {:?}", e);
+                    cx.prompt(
+                        gpui::PromptLevel::Critical,
+                        "Failed to start Dev Container. See logs for details",
+                        Some(&format!("{e}")),
+                        &["Ok"],
+                    )
+                    .await
+                    .ok();
+                    entity
+                        .update_in(cx, |remote_server_projects, window, cx| {
+                            remote_server_projects.mode =
+                                Mode::CreateRemoteDevContainer(CreateRemoteDevContainer::new(
+                                    DevContainerCreationProgress::Error(format!("{e}")),
+                                    cx,
+                                ));
+                            remote_server_projects.focus_handle(cx).focus(window, cx);
+                        })
+                        .ok();
+                    return;
+                }
+            };
+
             entity
                 .update(cx, |_, cx| {
                     cx.emit(DismissEvent);
@@ -2021,7 +2058,68 @@ impl RemoteServerProjects {
                                             .child(Label::new("Creating Dev Container"))
                                             .child(LoadingLabel::new("")),
                                     ),
-                            ),
+                            )
+                            .when(!state.logs.is_empty(), |this| {
+                                this.child(
+                                    v_flex()
+                                        .child(
+                                            ListItem::new("toggle-logs")
+                                                .inset(true)
+                                                .spacing(ui::ListItemSpacing::Sparse)
+                                                .start_slot(
+                                                    Icon::new(if state.logs_expanded {
+                                                        IconName::ChevronDown
+                                                    } else {
+                                                        IconName::ChevronRight
+                                                    })
+                                                    .color(Color::Muted),
+                                                )
+                                                .child(Label::new(format!(
+                                                    "Logs ({} lines)",
+                                                    state.logs.len()
+                                                )))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    if let Mode::CreateRemoteDevContainer(state) =
+                                                        &mut this.mode
+                                                    {
+                                                        state.logs_expanded = !state.logs_expanded;
+                                                        this.focus_handle(cx).focus(window, cx);
+                                                        cx.notify();
+                                                    }
+                                                })),
+                                        )
+                                        .when(state.logs_expanded, |this| {
+                                            this.child(
+                                                div()
+                                                    .id("devcontainer-build-logs")
+                                                    .bg(cx.theme().colors().editor_background)
+                                                    .h_80()
+                                                    .overflow_y_scroll()
+                                                    .mx_2()
+                                                    .my_1()
+                                                    .border_1()
+                                                    .border_color(
+                                                        cx.theme().colors().border_variant,
+                                                    )
+                                                    .p_2()
+                                                    .rounded_md()
+                                                    .child(v_flex().gap_0p5().children(
+                                                        state.logs.iter().rev().map(|log| {
+                                                            Label::new(log.text.clone())
+                                                                .size(LabelSize::Small)
+                                                                .color(match log.level {
+                                                                    DevContainerLogLevel::Trace => Color::Accent,
+                                                                    DevContainerLogLevel::Warning => Color::Warning,
+                                                                    DevContainerLogLevel::Error | DevContainerLogLevel::Critical  => Color::Error,
+                                                                    _ => Color::Muted,
+
+                                                                })
+                                                        }),
+                                                    )),
+                                            )
+                                        }),
+                                )
+                            }),
                     )
                     .into_any_element()
             }
