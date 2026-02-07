@@ -110,7 +110,7 @@ impl DevContainerLogPanel {
         Self {
             logs: Vec::new(),
             scroll_handle: ScrollHandle::new(),
-            expanded: true,
+            expanded: false,
         }
     }
 }
@@ -2090,7 +2090,8 @@ impl RemoteServerProjects {
                                                     .color(Color::Muted),
                                                 )
                                                 .child(Label::new(format!(
-                                                    "Progress ({} lines)",
+                                                    "{} Logs ({} lines)",
+                                                    if state.log_panel.expanded { "Hide" } else { "Show" },
                                                     state.log_panel.logs.len()
                                                 )))
                                                 .on_click(cx.listener(|this, _, window, cx| {

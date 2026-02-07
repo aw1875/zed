@@ -10,7 +10,11 @@ use gpui::AsyncWindowContext;
 use node_runtime::NodeRuntime;
 use serde::{Deserialize, Deserializer};
 use settings::{DevContainerConnection, Settings as _};
-use smol::{fs, io::BufReader, process::Command};
+use smol::{
+    fs,
+    io::{AsyncBufReadExt, BufReader},
+    process::Command,
+};
 use util::rel_path::RelPath;
 use workspace::Workspace;
 
@@ -576,40 +580,18 @@ async fn devcontainer_up(
     let stderr_task = smol::spawn(async move {
         let mut reader = BufReader::new(stderr);
         let mut output = String::new();
-        let mut buffer = vec![0u8; 1024];
-        let mut partial_line = String::new();
+        let mut line = String::new();
 
         loop {
-            match reader.read(&mut buffer).await {
-                Ok(0) => {
-                    if !partial_line.is_empty() {
-                        let trimmed = partial_line.trim_end();
-
-                        if !trimmed.is_empty() {
-                            if let Some(parsed) = DevContainerUpOutput::from_json(trimmed) {
-                                let _ = output_sender.unbounded_send(parsed);
-                            }
-                        }
-
-                        output.push_str(&partial_line);
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end();
+                    if let Some(parsed) = DevContainerUpOutput::from_json(trimmed) {
+                        let _ = output_sender.unbounded_send(parsed);
                     }
-                    break;
-                }
-                Ok(n) => {
-                    let chunk = String::from_utf8_lossy(&buffer[..n]);
-                    partial_line.push_str(&chunk);
-
-                    while let Some(newline_pos) = partial_line.find('\n') {
-                        let line = &partial_line[..=newline_pos];
-                        let trimmed = line.trim_end();
-
-                        if let Some(parsed) = DevContainerUpOutput::from_json(trimmed) {
-                            let _ = output_sender.unbounded_send(parsed);
-                        }
-
-                        output.push_str(line);
-                        partial_line.drain(..=newline_pos);
-                    }
+                    output.push_str(&line);
                 }
                 Err(e) => {
                     log::error!("Error reading stderr: {}", e);
